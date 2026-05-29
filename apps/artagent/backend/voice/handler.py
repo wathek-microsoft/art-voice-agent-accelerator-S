@@ -370,7 +370,14 @@ class VoiceHandler:
             orchestration_tasks=orchestration_tasks,
             event_loop=event_loop,
         )
-        context.bridge_mode = BRIDGE_MODE_DEFAULT
+
+        # Browser/web sessions already deliver PCM16, so the PCMU<->PCM16 bridge
+        # is never needed there. For all other transports (e.g. ACS telephony),
+        # honor the configured BRIDGE_MODE.
+        if config.transport == "browser":
+            context.bridge_mode = "off"
+        else:
+            context.bridge_mode = BRIDGE_MODE_DEFAULT
 
         if context.bridge_mode == "pcmu_pcm16":
             try:

@@ -921,8 +921,10 @@ class VoiceLiveSDKHandler:
                     "timeout": self._settings.ws_timeout,
                 }
 
-                # Initialize audio bridge for PCMU<->PCM16 conversion if enabled
-                if _BRIDGE_MODE == "pcmu_pcm16":
+                # Initialize audio bridge for PCMU<->PCM16 conversion if enabled.
+                # Browser transport delivers PCM16 directly, so skip the bridge there;
+                # for all other transports (e.g. ACS telephony), honor BRIDGE_MODE.
+                if _BRIDGE_MODE == "pcmu_pcm16" and self._transport != "browser":
                     try:
                         # self._audio_bridge = FfmpegAudioBridge(
                         #     buffer_limit_ms=_BRIDGE_BUFFER_LIMIT_MS,
