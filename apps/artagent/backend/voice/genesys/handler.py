@@ -225,6 +225,12 @@ class GenesysVoiceLiveHandler:
         self._is_playing = False
         self._audio_buffer: list[bytes] = []
         self._active_response_ids: set[str] = set()
+        # Set when the user barges in. Suppresses any in-flight audio deltas
+        # arriving from VoiceLive until the next response starts. Without this,
+        # the few RESPONSE_AUDIO_DELTA events that race past response.cancel
+        # would restart the pacer and continue streaming audio to Genesys.
+        self._barging_in = False
+        self._barged_response_ids: set[str] = set()
 
         # Accumulate small audio chunks before sending (200ms = 1600 bytes at 8kHz µ-law)
         self._audio_accum = bytearray()
@@ -604,11 +610,23 @@ class GenesysVoiceLiveHandler:
                 logger.warning("[Genesys] Audio delta with no data | session=%s", self.session_id)
                 return
 
-            # First audio chunk → send playback lifecycle
             response_id = getattr(event, "response_id", None)
+
+            # Drop any audio that belongs to a response the user already barged in on.
+            # VoiceLive may still emit a few deltas after response.cancel is sent;
+            # without this guard the pacer would restart and continue streaming.
+            if response_id and response_id in self._barged_response_ids:
+                return
+            if self._barging_in and (not response_id or response_id not in self._active_response_ids):
+                # Still in barge-in window and no new response has started yet.
+                return
+
+            # First audio chunk → send playback lifecycle
             if response_id and response_id not in self._active_response_ids:
                 self._active_response_ids.add(response_id)
                 self._is_playing = True
+                # A fresh response means the barge-in window is over.
+                self._barging_in = False
                 logger.info("[Genesys] First audio chunk for response=%s | session=%s", response_id, self.session_id)
 
             # Convert PCM16 24kHz (raw bytes or base64) → µ-law 8kHz raw bytes
@@ -647,6 +665,13 @@ class GenesysVoiceLiveHandler:
                 self._pacer_task.cancel()
             self._audio_accum.clear()
             self._audio_buffer.clear()
+            # Mark current responses as barged so late deltas are dropped, and
+            # block any new audio enqueues until a fresh response starts.
+            self._barging_in = True
+            self._barged_response_ids.update(self._active_response_ids)
+            # Drop any binary frames still sitting in the outbound queue so the
+            # barge_in event reaches Genesys before more audio does.
+            self._drain_pending_audio_frames()
             # Send barge-in event
             await self._enqueue_message(self._protocol.create_barge_in_event())
             self._is_playing = False
@@ -696,6 +721,9 @@ class GenesysVoiceLiveHandler:
         """Accumulate audio data. A pacer task drains it at real-time rate."""
         if not data:
             return
+        if self._barging_in:
+            # User is barging in — drop audio instead of restarting the pacer.
+            return
         self._audio_accum.extend(data)
         # Start pacer if not running
         if self._pacer_task is None or self._pacer_task.done():
@@ -725,6 +753,33 @@ class GenesysVoiceLiveHandler:
                 await self._outbound_queue.put(chunk)
         except asyncio.CancelledError:
             pass
+
+    def _drain_pending_audio_frames(self) -> None:
+        """Remove any queued binary audio frames from the outbound queue.
+
+        Keeps JSON protocol messages intact so that the ``barge_in`` event we
+        enqueue immediately after still goes through. Without this, audio
+        chunks already queued before the user spoke would be sent to Genesys
+        ahead of the barge-in signal.
+        """
+        kept: list[bytes | dict[str, Any]] = []
+        dropped = 0
+        while True:
+            try:
+                item = self._outbound_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if isinstance(item, (bytes, bytearray)):
+                dropped += 1
+                continue
+            kept.append(item)
+        for item in kept:
+            self._outbound_queue.put_nowait(item)
+        if dropped:
+            logger.debug(
+                "[Genesys] Dropped %d pending audio frame(s) on barge-in | session=%s",
+                dropped, self.session_id,
+            )
 
     async def _flush_audio_buffer(self) -> None:
         """Flush any remaining accumulated audio (e.g., at end of response)."""
