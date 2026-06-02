@@ -52,11 +52,31 @@ async def genesys_audiohook_stream(websocket: WebSocket):
         # Fall back to query parameter or generate one
         session_id = websocket.query_params.get("session_id", str(uuid.uuid4()))
 
-    logger.info("[Genesys] WebSocket connect | session=%s", session_id)
+    logger.info(
+        "[Genesys] WebSocket connect | session=%s offered_subprotocols=%s",
+        session_id,
+        websocket.headers.get("sec-websocket-protocol"),
+    )
 
     handler = GenesysVoiceLiveHandler(websocket=websocket, session_id=session_id)
 
-    await websocket.accept(subprotocol="audiohook-v2")
+    # Genesys AudioHook negotiates a single subprotocol named "audiohook".
+    # The protocol version (currently "2") is exchanged inside the JSON
+    # `open` message, NOT at the WebSocket handshake layer. Accepting
+    # "audiohook-v2" causes Genesys to fail the subprotocol check and
+    # immediately reconnect — which matches the symptom of repeated
+    # connect/start/stop cycles with no `open` ever arriving.
+    offered = websocket.headers.get("sec-websocket-protocol", "")
+    offered_list = [p.strip() for p in offered.split(",") if p.strip()]
+    if "audiohook" in offered_list:
+        subprotocol = "audiohook"
+    elif offered_list:
+        # Honour whatever the client actually offered (forward compatibility).
+        subprotocol = offered_list[0]
+    else:
+        subprotocol = None
+
+    await websocket.accept(subprotocol=subprotocol)
 
     try:
         await handler.start()
