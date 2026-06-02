@@ -354,6 +354,20 @@ class GenesysVoiceLiveHandler:
     async def _handle_open(self, msg: dict[str, Any]) -> None:
         """Process session open and establish VoiceLive connection."""
         media = self._protocol.process_open(msg)
+
+        # Connection probe: Genesys periodically opens a synthetic session with
+        # conversationId=00000000-... and empty media to verify the connector
+        # is reachable. Respond with `opened` (media=[]) and stop — do NOT
+        # connect to VoiceLive. The client will follow up with `close`.
+        if self._protocol.is_probe:
+            await self._enqueue_message(self._protocol.create_opened(None))
+            self._session_opened = True
+            logger.info(
+                "[Genesys] Connection probe acknowledged | session=%s",
+                self.session_id,
+            )
+            return
+
         if not media:
             await self._enqueue_message(
                 self._protocol.create_disconnect("error", "No supported media format")

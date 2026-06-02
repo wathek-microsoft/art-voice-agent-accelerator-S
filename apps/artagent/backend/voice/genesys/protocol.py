@@ -66,6 +66,15 @@ DISCONNECT_ERROR = "error"
 SUPPORTED_FORMAT = "PCMU"
 SUPPORTED_RATE = 8000
 
+# Genesys connection probe uses an all-zero conversationId. The probe is a
+# health check that the AudioConnector dispatcher fires periodically; the
+# server must accept the open, respond with an empty `opened` (no media), and
+# let the client close cleanly. Treating the probe as a real call (e.g.
+# rejecting it with "No supported media format" or connecting upstream) causes
+# Genesys to flag the integration as "problem communicating with the audio
+# connector".
+PROBE_CONVERSATION_ID = "00000000-0000-0000-0000-000000000000"
+
 
 class GenesysProtocol:
     """Manages AudioHook v2 protocol state and message construction.
@@ -147,10 +156,17 @@ class GenesysProtocol:
 
         return msg
 
+    @property
+    def is_probe(self) -> bool:
+        """True when the current session is a Genesys connection probe."""
+        return self._conversation_id == PROBE_CONVERSATION_ID
+
     def process_open(self, msg: dict[str, Any]) -> dict[str, Any] | None:
         """Process an 'open' message and extract session parameters.
 
-        Returns the selected media parameter or None if no compatible format.
+        Returns the selected media parameter, an empty dict for a connection
+        probe (no media to select), or None if no compatible format was offered
+        on a real call.
         """
         params = msg.get("parameters", {})
         self._conversation_id = params.get("conversationId")
@@ -158,6 +174,15 @@ class GenesysProtocol:
         self._input_variables = params.get("inputVariables", {})
 
         media_list = params.get("media", [])
+
+        # Connection probe: respond with empty media list and skip upstream wiring.
+        if self.is_probe:
+            logger.info(
+                "[GenesysProtocol] Connection probe received | session=%s",
+                self.session_id,
+            )
+            self._selected_media = None
+            return {}
         for media in media_list:
             if media.get("format") == SUPPORTED_FORMAT and media.get("rate") == SUPPORTED_RATE:
                 # Narrow channels to a single mono channel. Genesys typically offers
@@ -204,11 +229,18 @@ class GenesysProtocol:
             "parameters": parameters,
         }
 
-    def create_opened(self, media: dict[str, Any]) -> dict[str, Any]:
-        """Create 'opened' response confirming media selection."""
+    def create_opened(self, media: dict[str, Any] | None) -> dict[str, Any]:
+        """Create 'opened' response confirming (or declining) media selection.
+
+        Pass an empty dict (``{}``) or ``None`` to respond with ``media: []``,
+        which is required for the Genesys connection probe.
+        """
+        media_param: list[dict[str, Any]] = []
+        if media:
+            media_param = [media]
         return self._create_server_message(
             SERVER_MSG_OPENED,
-            {"startPaused": False, "media": [media]},
+            {"startPaused": False, "media": media_param},
         )
 
     def create_pong(self) -> dict[str, Any]:
