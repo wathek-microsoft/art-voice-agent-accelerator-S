@@ -160,14 +160,30 @@ class GenesysProtocol:
         media_list = params.get("media", [])
         for media in media_list:
             if media.get("format") == SUPPORTED_FORMAT and media.get("rate") == SUPPORTED_RATE:
-                self._selected_media = media
+                # Narrow channels to a single mono channel. Genesys typically offers
+                # ["external", "internal"] (stereo). The server must select exactly
+                # the channels it will stream; we send/receive mono µ-law, so pick
+                # the external (caller) leg only. Echoing the offer unchanged makes
+                # Genesys expect stereo frames and disconnect with an audio config
+                # error.
+                offered_channels = media.get("channels") or ["external"]
+                selected_channel = (
+                    "external" if "external" in offered_channels else offered_channels[0]
+                )
+                selected = {
+                    "type": media.get("type", "audio"),
+                    "format": SUPPORTED_FORMAT,
+                    "rate": SUPPORTED_RATE,
+                    "channels": [selected_channel],
+                }
+                self._selected_media = selected
                 logger.info(
                     "[GenesysProtocol] Session opened | conversation=%s org=%s media=%s",
                     self._conversation_id,
                     self._organization_id,
-                    json.dumps(media),
+                    json.dumps(selected),
                 )
-                return media
+                return selected
 
         logger.warning("[GenesysProtocol] No supported media format found in open message")
         return None
@@ -190,7 +206,10 @@ class GenesysProtocol:
 
     def create_opened(self, media: dict[str, Any]) -> dict[str, Any]:
         """Create 'opened' response confirming media selection."""
-        return self._create_server_message(SERVER_MSG_OPENED, {"media": [media]})
+        return self._create_server_message(
+            SERVER_MSG_OPENED,
+            {"startPaused": False, "media": [media]},
+        )
 
     def create_pong(self) -> dict[str, Any]:
         """Create 'pong' keep-alive response."""
