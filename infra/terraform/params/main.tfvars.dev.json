@@ -10,12 +10,6 @@
   "redis_port": 10000,
   "model_deployments": [
     {
-      "name": "o3-mini",
-      "version": "2025-01-31",
-      "sku_name": "GlobalStandard",
-      "capacity": 50
-    },
-    {
       "name": "gpt-4o",
       "version": "2024-11-20",
       "sku_name": "GlobalStandard",
@@ -30,7 +24,7 @@
     {
       "name": "gpt-4.1-nano",
       "version": "2025-04-14",
-      "sku_name": "DataZoneStandard",
+      "sku_name": "GlobalStandard",
       "capacity": 500
     }
   ],

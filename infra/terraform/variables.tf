@@ -88,7 +88,7 @@ variable "acs_data_location" {
 variable "enable_acs_email" {
   description = "Enable Azure Communication Services Email integration (optional, not required for voice)"
   type        = bool
-  default     = true  # Backwards compatible - existing deployments have email resources
+  default     = true # Backwards compatible - existing deployments have email resources
 }
 
 variable "disable_local_auth" {
@@ -104,15 +104,17 @@ variable "enable_redis_ha" {
 }
 
 variable "redis_sku" {
-  description = "SKU for Azure Managed Redis (Enterprise) optimized for performance"
+  description = "SKU for Azure Managed Redis"
   type        = string
-  default     = "MemoryOptimized_M10"
+  default     = "Balanced_B0"
   validation {
     condition = contains([
-      "MemoryOptimized_M10", "MemoryOptimized_M20", "MemoryOptimized_M50",
-      "MemoryOptimized_M100", "ComputeOptimized_X5", "ComputeOptimized_X10"
+      "Balanced_B0", "Balanced_B1", "Balanced_B3", "Balanced_B5", "Balanced_B10",
+      "MemoryOptimized_M10", "MemoryOptimized_M20", "MemoryOptimized_M50", "MemoryOptimized_M100",
+      "ComputeOptimized_X5", "ComputeOptimized_X10", "ComputeOptimized_X20",
+      "FlashOptimized_A250", "FlashOptimized_A500", "FlashOptimized_A700", "FlashOptimized_A1000"
     ], var.redis_sku)
-    error_message = "Redis SKU must be a valid Enterprise tier SKU."
+    error_message = "Redis SKU must be a valid Azure Managed Redis SKU."
   }
 }
 
@@ -185,12 +187,6 @@ variable "model_deployments" {
       version  = "2024-07-18"
       sku_name = "DataZoneStandard"
       capacity = 150
-    },
-    {
-      name     = "o3-mini"
-      version  = "2025-01-31"
-      sku_name = "DataZoneStandard"
-      capacity = 50
     },
     {
       name     = "gpt-5.1"

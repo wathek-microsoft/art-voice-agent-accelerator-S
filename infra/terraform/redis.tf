@@ -13,7 +13,7 @@ import {
 }
 */
 resource "azapi_resource" "redisEnterprise" {
-  type                    = "Microsoft.Cache/redisEnterprise@2024-09-01-preview"
+  type                    = "Microsoft.Cache/redisEnterprise@2025-04-01"
   parent_id               = azurerm_resource_group.main.id
   name                    = replace(local.resource_names.redis, "-", "")
   location                = azurerm_resource_group.main.location
@@ -36,7 +36,7 @@ resource "azapi_resource" "redisEnterprise" {
 
 # Redis Enterprise Database with RBAC authentication
 resource "azapi_resource" "redisDatabase" {
-  type      = "Microsoft.Cache/redisEnterprise/databases@2024-09-01-preview"
+  type      = "Microsoft.Cache/redisEnterprise/databases@2025-04-01"
   parent_id = azapi_resource.redisEnterprise.id
   name      = "default"
   body = {
@@ -52,7 +52,7 @@ resource "azapi_resource" "redisDatabase" {
 }
 
 resource "azapi_resource" "backendRedisUser" {
-  type      = "Microsoft.Cache/redisEnterprise/databases/accessPolicyAssignments@2024-09-01-preview"
+  type      = "Microsoft.Cache/redisEnterprise/databases/accessPolicyAssignments@2025-04-01"
   name      = "backendaccess"
   parent_id = azapi_resource.redisDatabase.id
   body = {
@@ -66,7 +66,7 @@ resource "azapi_resource" "backendRedisUser" {
 }
 
 resource "azapi_resource" "principalRedisUser" {
-  type      = "Microsoft.Cache/redisEnterprise/databases/accessPolicyAssignments@2024-09-01-preview"
+  type      = "Microsoft.Cache/redisEnterprise/databases/accessPolicyAssignments@2025-04-01"
   name      = "principalaccess"
   parent_id = azapi_resource.redisDatabase.id
   body = {
@@ -80,7 +80,7 @@ resource "azapi_resource" "principalRedisUser" {
 }
 
 data "azapi_resource" "redis_enterprise_fetched" {
-  type      = "Microsoft.Cache/redisEnterprise@2024-09-01-preview"
+  type      = "Microsoft.Cache/redisEnterprise@2025-04-01"
   name      = azapi_resource.redisEnterprise.name
   parent_id = azurerm_resource_group.main.id
 }

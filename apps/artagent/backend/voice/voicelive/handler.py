@@ -927,9 +927,9 @@ class VoiceLiveSDKHandler:
                 }
 
                 # Initialize audio bridge for PCMU<->PCM16 conversion if enabled.
-                # Browser transport delivers PCM16 directly, so skip the bridge there;
-                # for all other transports (e.g. ACS telephony), honor BRIDGE_MODE.
-                if _BRIDGE_MODE == "pcmu_pcm16" and self._transport != "browser":
+                # Only ACS telephony needs PCMU; browser/realtime sessions deliver PCM16
+                # directly and must NOT go through the bridge.
+                if _BRIDGE_MODE == "pcmu_pcm16" and self._transport == "acs":
                     try:
                         # self._audio_bridge = FfmpegAudioBridge(
                         #     buffer_limit_ms=_BRIDGE_BUFFER_LIMIT_MS,
@@ -1727,8 +1727,14 @@ class VoiceLiveSDKHandler:
         if not pcm_bytes:
             return
 
+        # Per-frame sample rate label we report to the UI/transport.
+        # Defaults to the negotiated ACS rate; overridden for bridge/browser.
+        out_sample_rate: int = self._acs_sample_rate
+
         # When bridge is active, convert PCM16 24kHz → PCMU 8kHz for Genesys.
-        # Otherwise, resample 24kHz → ACS target rate (default 16kHz).
+        # For browser transport, skip server-side resampling and send raw
+        # 24kHz PCM16 (the frontend will resample to its AudioContext rate).
+        # Otherwise (ACS), resample 24kHz → ACS target rate (default 16kHz).
         if self._audio_bridge is not None:
             try:
                 pcmu_bytes = await asyncio.to_thread(
@@ -1740,6 +1746,10 @@ class VoiceLiveSDKHandler:
                 resampled = None
             if not resampled:
                 return
+            out_sample_rate = 8000
+        elif self._transport == "browser":
+            resampled = base64.b64encode(pcm_bytes).decode("utf-8")
+            out_sample_rate = 24000
         else:
             # Resample VoiceLive 24 kHz PCM to match ACS expectations.
             resampled = self._resample_audio(pcm_bytes)
@@ -1766,6 +1776,7 @@ class VoiceLiveSDKHandler:
                 data_b64=resampled,
                 frame_index=frame_index,
                 is_final=False,
+                sample_rate=out_sample_rate,
             )
         except Exception:
             logger.debug("Failed to relay audio delta", exc_info=True)
@@ -1777,6 +1788,7 @@ class VoiceLiveSDKHandler:
         data_b64: str | None,
         frame_index: int,
         is_final: bool,
+        sample_rate: int | None = None,
     ) -> None:
         if not self._websocket_open:
             return
@@ -1786,7 +1798,7 @@ class VoiceLiveSDKHandler:
             "type": "audio_data",
             "frame_index": frame_index,
             "total_frames": None,
-            "sample_rate": self._acs_sample_rate,
+            "sample_rate": sample_rate if sample_rate is not None else self._acs_sample_rate,
             "is_final": is_final,
             "response_id": response_id,
         }
