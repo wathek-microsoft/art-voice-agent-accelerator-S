@@ -617,9 +617,6 @@ class GenesysVoiceLiveHandler:
             # without this guard the pacer would restart and continue streaming.
             if response_id and response_id in self._barged_response_ids:
                 return
-            if self._barging_in and (not response_id or response_id not in self._active_response_ids):
-                # Still in barge-in window and no new response has started yet.
-                return
 
             # First audio chunk → send playback lifecycle
             if response_id and response_id not in self._active_response_ids:
