@@ -220,6 +220,10 @@ class GenesysVoiceLiveHandler:
         # Serialised outbound queue (prevents seq number corruption)
         self._outbound_queue: asyncio.Queue[bytes | dict[str, Any]] = asyncio.Queue()
         self._writer_task: asyncio.Task | None = None
+        # Lock used to serialise direct WebSocket writes (priority sends like
+        # ``barge_in``) with the queue writer so we never interleave a
+        # send_text/send_bytes call from two coroutines.
+        self._ws_send_lock = asyncio.Lock()
 
         # Audio playback state
         self._is_playing = False
@@ -669,8 +673,16 @@ class GenesysVoiceLiveHandler:
             # Drop any binary frames still sitting in the outbound queue so the
             # barge_in event reaches Genesys before more audio does.
             self._drain_pending_audio_frames()
-            # Send barge-in event
-            await self._enqueue_message(self._protocol.create_barge_in_event())
+            # Send barge_in event OUT-OF-BAND so Genesys discards its TTS
+            # playback buffer immediately. Sending via the queue would mean it
+            # waits behind whatever audio chunk the writer is mid-flight on.
+            await self._send_priority_message(self._protocol.create_barge_in_event())
+            # Tell VoiceLive to stop generating more audio for this turn.
+            if self._connection is not None:
+                try:
+                    await self._connection.response.cancel()
+                except Exception:
+                    logger.debug("VoiceLive response.cancel() failed during barge-in", exc_info=True)
             self._is_playing = False
             self._active_response_ids.clear()
 
@@ -713,6 +725,27 @@ class GenesysVoiceLiveHandler:
     async def _enqueue_message(self, msg: dict[str, Any]) -> None:
         """Enqueue a JSON protocol message for serialised sending."""
         await self._outbound_queue.put(msg)
+
+    async def _send_priority_message(self, msg: dict[str, Any]) -> None:
+        """Send a JSON message immediately, bypassing the outbound queue.
+
+        Used for barge_in so the event reaches Genesys before the next paced
+        audio chunk. The ws lock keeps us serialised with the writer task so
+        we never interleave with a concurrent send_bytes call.
+        """
+        if not self._websocket_open:
+            return
+        payload = json.dumps(msg)
+        msg_type = msg.get("type", "")
+        try:
+            async with self._ws_send_lock:
+                await self.websocket.send_text(payload)
+            logger.debug(
+                "[Genesys] Priority send %s | session=%s",
+                msg_type, self.session_id,
+            )
+        except Exception:
+            logger.debug("Failed to send priority message", exc_info=True)
 
     async def _enqueue_binary(self, data: bytes) -> None:
         """Accumulate audio data. A pacer task drains it at real-time rate."""
@@ -824,9 +857,11 @@ class GenesysVoiceLiveHandler:
                             "[Genesys] Sending %s | session=%s",
                             msg_type, self.session_id,
                         )
-                        await self.websocket.send_text(json.dumps(item))
+                        async with self._ws_send_lock:
+                            await self.websocket.send_text(json.dumps(item))
                     elif isinstance(item, bytes):
-                        await self.websocket.send_bytes(item)
+                        async with self._ws_send_lock:
+                            await self.websocket.send_bytes(item)
                 except Exception:
                     logger.debug("Failed to send outbound frame", exc_info=True)
         except asyncio.CancelledError:
