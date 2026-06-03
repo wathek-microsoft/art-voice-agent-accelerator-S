@@ -237,13 +237,13 @@ class GenesysVoiceLiveHandler:
         self._barged_response_ids: set[str] = set()
 
         # Accumulate small audio chunks before sending.
-        # Smaller chunks → less audio "in flight" → faster barge-in response.
-        # 20 ms at 8 kHz µ-law mono = 160 bytes. This matches Twilio Media
-        # Streams / ACS frame sizes and keeps the worst-case trailing audio
-        # the caller hears after a barge-in well under one frame.
+        # Genesys AudioHook v2 rate-limits binary frames; the spec recommends
+        # ~100 ms frames. 100 ms at 8 kHz µ-law mono = 800 bytes. This keeps
+        # us well under the rate limit while bounding the worst-case trailing
+        # audio after a barge-in to one frame (~100 ms).
         self._audio_accum = bytearray()
-        self._AUDIO_CHUNK_SIZE = 160   # 20 ms at 8 kHz µ-law mono
-        self._AUDIO_PACE_MS = 20       # Send one chunk every 20 ms
+        self._AUDIO_CHUNK_SIZE = 800   # 100 ms at 8 kHz µ-law mono
+        self._AUDIO_PACE_MS = 100      # Send one chunk every 100 ms
         self._pacer_task: asyncio.Task | None = None
 
     # ─────────────────────────────────────────────────────────────────────────
