@@ -246,6 +246,22 @@ class GenesysVoiceLiveHandler:
         self._AUDIO_PACE_MS = 100      # Send one chunk every 100 ms
         self._pacer_task: asyncio.Task | None = None
 
+        # ── Local barge-in detector (energy gate on inbound µ-law) ─────────
+        # VoiceLive server VAD can add 150-300 ms before SPEECH_STARTED fires.
+        # We trip barge-in locally on the first sufficiently-loud inbound frame
+        # so the caller hears the agent stop almost immediately. After
+        # tripping we still let VoiceLive's authoritative VAD handle turn end.
+        #
+        # Threshold is mean absolute amplitude of decoded PCM16 samples per
+        # 8 kHz frame. ~500 corresponds to roughly -36 dBFS — quiet speech.
+        # Tune downward for snappier (riskier) barge-in.
+        self._BARGE_IN_RMS_THRESHOLD = 500
+        # Require N consecutive loud frames (~20 ms each from Genesys) before
+        # firing, to ignore single-frame clicks / line noise.
+        self._BARGE_IN_MIN_FRAMES = 2
+        self._loud_frame_run = 0
+        self._local_barge_in_active = False
+
     # ─────────────────────────────────────────────────────────────────────────
     # Lifecycle
     # ─────────────────────────────────────────────────────────────────────────
@@ -355,11 +371,49 @@ class GenesysVoiceLiveHandler:
         if not self._running or not self._session_opened or not self._connection:
             return
 
+        # Local energy-gate barge-in: trip BEFORE forwarding to VoiceLive so
+        # we cut off the agent without waiting for the server-side VAD.
+        # Only run while the agent is actually speaking.
+        if self._is_playing and not self._local_barge_in_active:
+            if self._frame_is_loud(data):
+                self._loud_frame_run += 1
+                if self._loud_frame_run >= self._BARGE_IN_MIN_FRAMES:
+                    self._local_barge_in_active = True
+                    self._loud_frame_run = 0
+                    logger.info(
+                        "[Genesys] Local energy-gate barge-in | session=%s",
+                        self.session_id,
+                    )
+                    await self._trigger_barge_in(source="local_energy_gate")
+            else:
+                self._loud_frame_run = 0
+
         try:
             pcm16_b64 = ulaw_8khz_to_pcm16_24khz_b64(data)
             await self._connection.input_audio_buffer.append(audio=pcm16_b64)
         except Exception:
             logger.debug("Failed to forward audio to VoiceLive", exc_info=True)
+
+    @staticmethod
+    def _frame_is_loud_threshold() -> int:
+        # Indirection so subclasses/tests can override easily.
+        return 500
+
+    def _frame_is_loud(self, ulaw_bytes: bytes) -> bool:
+        """Cheap loudness check on a µ-law frame using the decode table."""
+        if not ulaw_bytes:
+            return False
+        try:
+            # Lazy import to avoid pulling numpy at module import time elsewhere.
+            from .audio_codec import _ULAW_DECODE_TABLE  # type: ignore
+            import numpy as np
+
+            indices = np.frombuffer(ulaw_bytes, dtype=np.uint8)
+            samples = _ULAW_DECODE_TABLE[indices].astype(np.int32)
+            mean_abs = int(np.mean(np.abs(samples)))
+            return mean_abs >= self._BARGE_IN_RMS_THRESHOLD
+        except Exception:
+            return False
 
     # ─────────────────────────────────────────────────────────────────────────
     # Protocol message handlers
@@ -632,6 +686,9 @@ class GenesysVoiceLiveHandler:
                 self._is_playing = True
                 # A fresh response means the barge-in window is over.
                 self._barging_in = False
+                # Re-arm the local energy-gate for the next user turn.
+                self._local_barge_in_active = False
+                self._loud_frame_run = 0
                 logger.info("[Genesys] First audio chunk for response=%s | session=%s", response_id, self.session_id)
 
             # Convert PCM16 24kHz (raw bytes or base64) → µ-law 8kHz raw bytes
@@ -665,30 +722,7 @@ class GenesysVoiceLiveHandler:
 
         elif etype == ServerEventType.INPUT_AUDIO_BUFFER_SPEECH_STARTED:
             logger.info("[Genesys] Speech started → barge-in | session=%s", self.session_id)
-            # Cancel pacer and clear accumulated audio
-            if self._pacer_task and not self._pacer_task.done():
-                self._pacer_task.cancel()
-            self._audio_accum.clear()
-            self._audio_buffer.clear()
-            # Mark current responses as barged so late deltas are dropped, and
-            # block any new audio enqueues until a fresh response starts.
-            self._barging_in = True
-            self._barged_response_ids.update(self._active_response_ids)
-            # Drop any binary frames still sitting in the outbound queue so the
-            # barge_in event reaches Genesys before more audio does.
-            self._drain_pending_audio_frames()
-            # Send barge_in event OUT-OF-BAND so Genesys discards its TTS
-            # playback buffer immediately. Sending via the queue would mean it
-            # waits behind whatever audio chunk the writer is mid-flight on.
-            await self._send_priority_message(self._protocol.create_barge_in_event())
-            # Tell VoiceLive to stop generating more audio for this turn.
-            if self._connection is not None:
-                try:
-                    await self._connection.response.cancel()
-                except Exception:
-                    logger.debug("VoiceLive response.cancel() failed during barge-in", exc_info=True)
-            self._is_playing = False
-            self._active_response_ids.clear()
+            await self._trigger_barge_in(source="voicelive_vad")
 
         elif etype == ServerEventType.INPUT_AUDIO_BUFFER_SPEECH_STOPPED:
             logger.debug("[Genesys] Speech stopped | session=%s", self.session_id)
@@ -729,6 +763,43 @@ class GenesysVoiceLiveHandler:
     async def _enqueue_message(self, msg: dict[str, Any]) -> None:
         """Enqueue a JSON protocol message for serialised sending."""
         await self._outbound_queue.put(msg)
+
+    async def _trigger_barge_in(self, *, source: str) -> None:
+        """Stop current playback and signal Genesys, regardless of VAD source.
+
+        Called from either the local energy-gate (fast path, on first loud
+        inbound frame) or VoiceLive's server VAD (SPEECH_STARTED). Safe to
+        call multiple times for the same turn — second call is a no-op.
+        """
+        if self._barging_in:
+            return
+        logger.info(
+            "[Genesys] Barge-in trigger | source=%s session=%s",
+            source, self.session_id,
+        )
+        # Cancel pacer and clear accumulated audio
+        if self._pacer_task and not self._pacer_task.done():
+            self._pacer_task.cancel()
+        self._audio_accum.clear()
+        self._audio_buffer.clear()
+        # Mark current responses as barged so late deltas are dropped, and
+        # block any new audio enqueues until a fresh response starts.
+        self._barging_in = True
+        self._barged_response_ids.update(self._active_response_ids)
+        # Drop any binary frames still sitting in the outbound queue so the
+        # barge_in event reaches Genesys before more audio does.
+        self._drain_pending_audio_frames()
+        # Send barge_in OUT-OF-BAND so Genesys discards its TTS playback
+        # buffer immediately, ahead of any paced audio chunk.
+        await self._send_priority_message(self._protocol.create_barge_in_event())
+        # Tell VoiceLive to stop generating more audio for this turn.
+        if self._connection is not None:
+            try:
+                await self._connection.response.cancel()
+            except Exception:
+                logger.debug("VoiceLive response.cancel() failed during barge-in", exc_info=True)
+        self._is_playing = False
+        self._active_response_ids.clear()
 
     async def _send_priority_message(self, msg: dict[str, Any]) -> None:
         """Send a JSON message immediately, bypassing the outbound queue.
